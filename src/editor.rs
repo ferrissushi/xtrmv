@@ -23,6 +23,34 @@ pub const CTRL_W: u8 = ctrl_key!(b'w');
 pub const CTRL_H: u8 = ctrl_key!(b'h');
 pub const BACKSPACE: u8 = 127;
 
+// ASCII constants
+pub const ASCII_SPACE: u8 = 32;
+pub const ASCII_DELETE: u8 = 127;
+pub const ASCII_DIGIT_OFFSET: u8 = 48;
+pub const PRINTABLE_RANGE: std::ops::Range<u8> = ASCII_SPACE..ASCII_DELETE;
+
+// Vim key bindings
+pub const KEY_H: u8 = b'h';
+pub const KEY_J: u8 = b'j';
+pub const KEY_K: u8 = b'k';
+pub const KEY_L: u8 = b'l';
+pub const KEY_V: u8 = b'v';
+pub const KEY_I: u8 = b'i';
+pub const KEY_A: u8 = b'a';
+pub const KEY_O: u8 = b'o';
+pub const KEY_O_UPPER: u8 = b'O';
+pub const KEY_W: u8 = b'w';
+pub const KEY_B: u8 = b'b';
+pub const KEY_E: u8 = b'e';
+pub const KEY_X: u8 = b'x';
+pub const KEY_D: u8 = b'd';
+pub const KEY_G: u8 = b'g';
+pub const KEY_H_UPPER: u8 = b'H';
+pub const KEY_L_UPPER: u8 = b'L';
+pub const KEY_M_UPPER: u8 = b'M';
+pub const KEY_A_UPPER: u8 = b'A';
+pub const KEY_ZERO: u8 = b'0';
+
 use crate::{
     key::Key,
     mode::{stringify_mode, Mode},
@@ -39,15 +67,22 @@ pub struct Editor {
     pub _mode: RawMode,
     pub line_number_width: usize,
     pub type_mode: Mode,
-    pub c_inline_pos: usize,
-    pub c_block_pos: usize,
-    pub c_inline_pos_with_tab: usize,
+    /// Cursor column position (character index)
+    pub cursor_col: usize,
+    /// Cursor row position (0-indexed)
+    pub cursor_row: usize,
+    /// Visual cursor column position (accounting for tabs)
+    pub visual_cursor_col: usize,
     pub initial_colorcolumn: usize,
-    pub c_inline_start_select: usize,
-    pub c_block_start_select: usize,
+    /// Selection start column
+    pub select_start_col: usize,
+    /// Selection start row
+    pub select_start_row: usize,
     pub start_key: u8,
-    pub rowoff: usize,
-    pub coloff: usize,
+    /// Row offset for scrolling
+    pub row_offset: usize,
+    /// Column offset for scrolling
+    pub col_offset: usize,
     pub active_rows: usize,
     pub active_cols: usize,
     pub rows: Vec<Row>,
@@ -72,14 +107,14 @@ impl Editor {
             line_number_width: 4,
             type_mode: Mode::Normal,
             filetype: "none".to_string(),
-            c_inline_pos: 0,
-            c_block_pos: 0,
-            c_inline_pos_with_tab: 0,
+            cursor_col: 0,
+            cursor_row: 0,
+            visual_cursor_col: 0,
             start_key: 0,
-            rowoff: 0,
-            coloff: 0,
-            c_inline_start_select: 0,
-            c_block_start_select: 0,
+            row_offset: 0,
+            col_offset: 0,
+            select_start_col: 0,
+            select_start_row: 0,
             active_rows: (rows - 2) as usize,
             active_cols: cols as usize,
             rows: Vec::new(),
@@ -92,6 +127,38 @@ impl Editor {
         })
     }
 
+    /// Creates an editor for testing purposes without enabling raw mode
+    #[doc(hidden)]
+    pub fn new_for_test(rows: Vec<Row>) -> Self {
+        let stdin = stdin();
+        let stdout = stdout();
+        let mode = RawMode::new_disabled();
+        Self {
+            initial_colorcolumn: 100,
+            _mode: mode,
+            line_number_width: 4,
+            type_mode: Mode::Normal,
+            filetype: "none".to_string(),
+            cursor_col: 0,
+            cursor_row: 0,
+            visual_cursor_col: 0,
+            start_key: 0,
+            row_offset: 0,
+            col_offset: 0,
+            select_start_col: 0,
+            select_start_row: 0,
+            active_rows: 24,
+            active_cols: 80,
+            rows,
+            modified: false,
+            stdin,
+            stdout,
+            filename: None,
+            notification: String::new(),
+            notification_timeout: Instant::now(),
+        }
+    }
+
     pub fn write(&mut self, buf: &[u8]) -> Result<()> {
         self.stdout.write_all(buf)
     }
@@ -101,23 +168,25 @@ impl Editor {
     }
 
     pub fn scroll(&mut self) {
-        self.c_inline_pos_with_tab = self.c_inline_pos;
-        if self.c_block_pos < self.numrows() {
-            self.c_inline_pos_with_tab = self.rows[self.c_block_pos].cx_to_rx(self.c_inline_pos);
+        self.visual_cursor_col = self.cursor_col;
+        if self.cursor_row < self.numrows() {
+            let row_len = self.rows[self.cursor_row].characters.len();
+            let safe_inline_pos = self.cursor_col.min(row_len);
+            self.visual_cursor_col = self.rows[self.cursor_row].cx_to_rx(safe_inline_pos);
         }
 
-        if self.c_block_pos < self.rowoff {
-            self.rowoff = self.c_block_pos;
+        if self.cursor_row < self.row_offset {
+            self.row_offset = self.cursor_row;
         }
 
-        if self.c_block_pos >= self.rowoff + self.active_rows {
-            self.rowoff = self.c_block_pos - self.active_rows + 1;
+        if self.cursor_row >= self.row_offset + self.active_rows {
+            self.row_offset = self.cursor_row.saturating_sub(self.active_rows) + 1;
         }
-        if self.c_inline_pos_with_tab < self.coloff {
-            self.coloff = self.c_inline_pos_with_tab;
+        if self.visual_cursor_col < self.col_offset {
+            self.col_offset = self.visual_cursor_col;
         }
-        if self.c_inline_pos_with_tab >= self.coloff + self.active_cols {
-            self.coloff = (1 + self.c_inline_pos_with_tab) - self.active_cols;
+        if self.visual_cursor_col >= self.col_offset + self.active_cols {
+            self.col_offset = self.visual_cursor_col.saturating_sub(self.active_cols) + 1;
         }
     }
 
@@ -130,7 +199,7 @@ impl Editor {
         let mut count = 0;
 
         for y in 0..(self.active_rows) {
-            let filerow = y + self.rowoff;
+            let filerow = y + self.row_offset;
             if filerow >= numrows {
                 if self.filename.is_none()
                     && self.rows.is_empty()
@@ -174,7 +243,7 @@ impl Editor {
                 let content_width = self.active_cols.saturating_sub(self.line_number_width);
                 self.stdout.write_all(byte_slice(
                     &self.rows[filerow].render,
-                    self.coloff,
+                    self.col_offset,
                     content_width,
                 ))?;
             }
@@ -202,8 +271,8 @@ impl Editor {
             content.truncate(self.active_cols);
             status = content;
         }
-        let visual_c_pos_inline = self.c_inline_pos_with_tab + 1;
-        let visual_c_pos_block = self.c_block_pos + 1;
+        let visual_c_pos_inline = self.visual_cursor_col + 1;
+        let visual_c_pos_block = self.cursor_row + 1;
         let right_status_content = format!("{}:{}", visual_c_pos_inline, visual_c_pos_block);
 
         self.write(status.as_bytes())?;
@@ -284,11 +353,11 @@ impl Editor {
 
         let move_cursor = format!(
             "\x1b[{};{}H",
-            (self.c_block_pos.saturating_sub(self.rowoff) + 1),
-            (self.c_inline_pos_with_tab.saturating_sub(self.coloff)) + 1 + self.line_number_width
+            (self.cursor_row.saturating_sub(self.row_offset) + 1),
+            (self.visual_cursor_col.saturating_sub(self.col_offset)) + 1 + self.line_number_width
         )
         .into_bytes();
-        // c_block_pos - self.rowoff is the cursor position relative to what's visible.
+        // cursor_row - self.row_offset is the cursor position relative to what's visible.
         // it is dynamic
         self.write(&move_cursor)?;
 
@@ -297,7 +366,9 @@ impl Editor {
     }
 
     pub fn refresh_screen(&mut self) {
-        self.try_refresh_screen().expect("Failed to refresh screen");
+        if let Err(e) = self.try_refresh_screen() {
+            self.set_status_message(format!("Screen refresh error: {}", e));
+        }
     }
 
     pub fn set_status_message<S: Into<String>>(&mut self, msg: S) {
@@ -340,7 +411,7 @@ impl Editor {
                 Key::ArrowLeft | Key::ArrowRight | Key::ArrowUp | Key::ArrowDown => {
                     callback(self, &buf, k);
                 }
-                Key::Character(c) if (32..127).contains(&c) => {
+                Key::Character(c) if PRINTABLE_RANGE.contains(&c) => {
                     buf.push(c as char);
                     callback(self, &buf, k);
                 }
@@ -354,68 +425,46 @@ impl Editor {
 
     pub fn move_cursor_with_vim_key(&mut self, k: Key) -> bool {
         match k {
-            Key::Character(b'k') => {
-                if self.c_block_pos > 0 {
-                    self.c_block_pos -= 1;
-                }
-            }
-            Key::Character(b'j') => {
-                if self.numrows() != 0 && self.c_block_pos < self.numrows() - 1 {
-                    self.c_block_pos += 1;
-                }
-            }
-            Key::Character(b'h') => {
-                if self.c_inline_pos > 0 {
-                    self.c_inline_pos -= 1;
-                } else if self.c_block_pos > 0 {
-                    self.c_block_pos -= 1;
-                    self.c_inline_pos = self.rowlen(self.c_block_pos);
-                }
-            }
-            Key::Character(b'l') => {
-                let row = self.rows.get(self.c_block_pos);
-                let rowlen = row.map_or(0, |r| r.characters.len());
-                if self.c_inline_pos < rowlen {
-                    self.c_inline_pos += 1;
-                } else if row.is_some() && self.c_inline_pos == rowlen {
-                    self.c_inline_pos = 0;
-                    self.c_block_pos += 1;
-                }
-            }
+            Key::Character(KEY_K) => self.move_cursor_up(),
+            Key::Character(KEY_J) => self.move_cursor_down(),
+            Key::Character(KEY_H) => self.move_cursor_left(),
+            Key::Character(KEY_L) => self.move_cursor_right(),
             _ => (),
         }
         true
     }
 
     pub fn move_cursor_left(&mut self) {
-        if self.c_inline_pos > 0 {
-            self.c_inline_pos -= 1;
-        } else if self.c_block_pos > 0 {
-            self.c_block_pos -= 1;
-            self.c_inline_pos = self.rowlen(self.c_block_pos);
+        if self.cursor_col > 0 {
+            self.cursor_col -= 1;
+        } else if self.cursor_row > 0 {
+            self.cursor_row -= 1;
+            self.cursor_col = self.rowlen(self.cursor_row);
         }
     }
 
     pub fn move_cursor_right(&mut self) {
-        let row = self.rows.get(self.c_block_pos);
+        let row = self.rows.get(self.cursor_row);
         let rowlen = row.map_or(0, |r| r.characters.len());
-        if self.c_inline_pos < rowlen {
-            self.c_inline_pos += 1;
-        } else if row.is_some() && self.c_inline_pos == rowlen {
-            self.c_inline_pos = 0;
-            self.c_block_pos += 1;
+        if self.cursor_col < rowlen {
+            self.cursor_col += 1;
+        } else if row.is_some() && self.cursor_col == rowlen {
+            if self.cursor_row + 1 < self.numrows() {
+                self.cursor_col = 0;
+                self.cursor_row += 1;
+            }
         }
     }
 
     pub fn move_cursor_down(&mut self) {
-        if self.numrows() != 0 && self.c_block_pos < self.numrows() - 1 {
-            self.c_block_pos += 1;
+        if self.numrows() != 0 && self.cursor_row < self.numrows() - 1 {
+            self.cursor_row += 1;
         }
     }
 
     pub fn move_cursor_up(&mut self) {
-        if self.c_block_pos > 0 {
-            self.c_block_pos -= 1;
+        if self.cursor_row > 0 {
+            self.cursor_row -= 1;
         }
     }
 
@@ -436,67 +485,90 @@ impl Editor {
             _ => (),
         }
 
-        let rowlen = self.rowlen(self.c_block_pos);
-        if self.c_inline_pos > rowlen {
-            self.c_inline_pos = rowlen;
+        let rowlen = self.rowlen(self.cursor_row);
+        if self.cursor_col > rowlen {
+            self.cursor_col = rowlen;
         }
     }
 
     pub fn insert_char(&mut self, c: char) {
-        if self.c_block_pos == self.rows.len() {
+        if self.cursor_row >= self.rows.len() {
             self.rows.push(Row::new(""));
         }
-        self.rows[self.c_block_pos].insert_char(self.c_inline_pos, c);
-        self.rows[self.c_block_pos].update_render_with_syntax(&self.filetype);
-        self.c_inline_pos += 1;
+        let row = &mut self.rows[self.cursor_row];
+        let safe_pos = self.cursor_col.min(row.characters.len());
+        row.insert_char(safe_pos, c);
+        row.update_render_with_syntax(&self.filetype);
+        self.cursor_col = safe_pos + 1;
         self.modified = true;
     }
 
     pub fn insert_new_line(&mut self) {
-        if self.c_inline_pos == 0 {
-            self.rows.insert(self.c_block_pos, Row::new(""));
-            self.rows[self.c_block_pos].update_render_with_syntax(&self.filetype);
-        } else {
-            let new_line = self.rows[self.c_block_pos].truncate(self.c_inline_pos);
-            self.rows[self.c_block_pos].update_render_with_syntax(&self.filetype);
-            self.rows.insert(self.c_block_pos + 1, Row::new(new_line));
-            self.rows[self.c_block_pos + 1].update_render_with_syntax(&self.filetype);
+        if self.cursor_row >= self.rows.len() {
+            self.rows.push(Row::new(""));
+            self.cursor_row = self.rows.len() - 1;
+            self.cursor_col = 0;
+            return;
         }
-        self.c_block_pos += 1;
-        self.c_inline_pos = 0;
+        if self.cursor_col == 0 {
+            self.rows.insert(self.cursor_row, Row::new(""));
+            if let Some(row) = self.rows.get_mut(self.cursor_row) {
+                row.update_render_with_syntax(&self.filetype);
+            }
+        } else {
+            let safe_pos = self
+                .cursor_col
+                .min(self.rows[self.cursor_row].characters.len());
+            let new_line = self.rows[self.cursor_row].truncate(safe_pos);
+            self.rows[self.cursor_row].update_render_with_syntax(&self.filetype);
+            self.rows.insert(self.cursor_row + 1, Row::new(new_line));
+            if let Some(row) = self.rows.get_mut(self.cursor_row + 1) {
+                row.update_render_with_syntax(&self.filetype);
+            }
+        }
+        self.cursor_row += 1;
+        self.cursor_col = 0;
     }
 
     pub fn delete_char_by_space(&mut self) {
-        if let Some(r) = self.rows.get(self.c_block_pos) {
+        if let Some(r) = self.rows.get(self.cursor_row) {
             let chars: Vec<char> = r.characters.chars().collect();
             loop {
-                if self.c_inline_pos == 0 {
+                if self.cursor_col == 0 {
                     break;
                 }
                 self.delete_char();
-                if chars[self.c_inline_pos] == ' ' {
+                if chars[self.cursor_col] == ' ' {
                     break;
                 }
             }
         }
     }
     pub fn delete_char(&mut self) {
-        if self.c_block_pos == self.rows.len() {
+        if self.rows.is_empty() {
             return;
         }
-        if self.c_block_pos == 0 && self.c_inline_pos == 0 {
+        if self.cursor_row >= self.rows.len() {
+            self.cursor_row = self.rows.len().saturating_sub(1);
+        }
+        if self.cursor_row == 0 && self.cursor_col == 0 {
             return;
         }
-        if self.c_inline_pos > 0 {
-            self.c_inline_pos -= 1;
-            self.rows[self.c_block_pos].delete_char(self.c_inline_pos);
-            self.rows[self.c_block_pos].update_render_with_syntax(&self.filetype);
-        } else {
-            let right = self.rows.remove(self.c_block_pos);
-            self.c_block_pos -= 1;
-            let left = &mut self.rows[self.c_block_pos];
-            self.c_inline_pos = left.characters.len();
-            left.append_str(right.characters.as_str());
+        if self.cursor_col > 0 {
+            let safe_pos = self.cursor_col.saturating_sub(1);
+            self.cursor_col = safe_pos;
+            if let Some(row) = self.rows.get_mut(self.cursor_row) {
+                row.delete_char(safe_pos);
+                row.update_render_with_syntax(&self.filetype);
+            }
+        } else if self.cursor_row > 0 {
+            let right = self.rows.remove(self.cursor_row);
+            self.cursor_row -= 1;
+            if let Some(left) = self.rows.get_mut(self.cursor_row) {
+                self.cursor_col = left.characters.len();
+                left.append_str(right.characters.as_str());
+                left.update_render_with_syntax(&self.filetype);
+            }
         }
         self.modified = true;
     }
@@ -562,10 +634,10 @@ impl Editor {
         match c {
             Key::Character(CTRL_C) => {
                 self.type_mode = Mode::Normal;
-                self.c_inline_pos = self.c_inline_start_select;
-                self.c_block_pos = self.c_block_start_select;
-                self.c_inline_start_select = 0;
-                self.c_block_start_select = 0;
+                self.cursor_col = self.select_start_col;
+                self.cursor_row = self.select_start_row;
+                self.select_start_col = 0;
+                self.select_start_row = 0;
                 return true;
             }
             Key::Character(b'h')
@@ -576,19 +648,19 @@ impl Editor {
                 return true;
             }
             Key::Character(b'x') | Key::Character(b'd') => {
-                if self.c_block_pos < self.c_block_start_select
-                    || (self.c_block_pos == self.c_block_start_select
-                        && self.c_inline_pos < self.c_inline_start_select)
+                if self.cursor_row < self.select_start_row
+                    || (self.cursor_row == self.select_start_row
+                        && self.cursor_col < self.select_start_col)
                 {
-                    let temp_x = self.c_inline_pos;
-                    let temp_y = self.c_block_pos;
-                    self.c_inline_pos = self.c_inline_start_select;
-                    self.c_block_pos = self.c_block_start_select;
-                    self.c_inline_start_select = temp_x;
-                    self.c_block_start_select = temp_y;
+                    let temp_x = self.cursor_col;
+                    let temp_y = self.cursor_row;
+                    self.cursor_col = self.select_start_col;
+                    self.cursor_row = self.select_start_row;
+                    self.select_start_col = temp_x;
+                    self.select_start_row = temp_y;
                 }
-                while (self.c_inline_pos, self.c_block_pos)
-                    != (self.c_inline_start_select, self.c_block_start_select)
+                while (self.cursor_col, self.cursor_row)
+                    != (self.select_start_col, self.select_start_row)
                 {
                     self.delete_char();
                 }
@@ -609,13 +681,13 @@ impl Editor {
             | Key::Character(b'l')
             | Key::Character(b'h') => self.move_cursor_with_vim_key(c),
             Key::Character(b'x') => {
-                self.c_inline_pos += 1;
+                self.cursor_col += 1;
                 self.delete_char();
                 true
             }
             Key::Character(b'v') => {
-                self.c_inline_start_select = self.c_inline_pos;
-                self.c_block_start_select = self.c_block_pos;
+                self.select_start_col = self.cursor_col;
+                self.select_start_row = self.cursor_row;
                 self.type_mode = Mode::Select;
                 true
             }
@@ -630,43 +702,47 @@ impl Editor {
             }
             Key::Character(b'o') => {
                 self.type_mode = Mode::Insert;
-                self.c_inline_pos = self.rowlen(self.c_block_pos);
+                self.cursor_col = self.rowlen(self.cursor_row);
                 self.insert_new_line();
+                self.cursor_row = self
+                    .cursor_row
+                    .saturating_add(1)
+                    .min(self.rows.len().saturating_sub(1));
                 true
             }
             Key::Character(b'O') => {
                 self.type_mode = Mode::Insert;
-                self.c_inline_pos = 0;
+                self.cursor_col = 0;
                 self.insert_new_line();
-                self.c_block_pos -= 1;
+                self.cursor_row = self.cursor_row.saturating_sub(1);
                 true
             }
             Key::Character(b'H') => {
-                self.c_block_pos = 0;
-                self.c_inline_pos = 0;
+                self.cursor_row = 0;
+                self.cursor_col = 0;
                 true
             }
             Key::Character(b'L') => {
-                self.c_inline_pos = 0;
-                self.c_block_pos = self.rows.len() - 1;
+                self.cursor_col = 0;
+                self.cursor_row = self.rows.len().saturating_sub(1);
                 true
             }
             Key::Character(b'0') => {
-                self.c_inline_pos = 0;
+                self.cursor_col = 0;
                 true
             }
             Key::Character(b'$') => {
-                self.c_inline_pos = self.rowlen(self.c_block_pos);
+                self.cursor_col = self.rowlen(self.cursor_row);
                 true
             }
             Key::Character(b'M') => {
                 let middle_pos = (self.rows.len() - 1) / 2;
-                self.c_block_pos = middle_pos;
+                self.cursor_row = middle_pos;
                 true
             }
             Key::Character(b'G') => {
-                self.c_block_pos = self.rows.len() - 1;
-                self.c_inline_pos = 0;
+                self.cursor_row = self.rows.len() - 1;
+                self.cursor_col = 0;
                 true
             }
             Key::Character(b'g') => {
@@ -678,7 +754,7 @@ impl Editor {
                 self.move_by_space(c)
             }
             Key::Character(b'A') => {
-                self.c_inline_pos = self.rowlen(self.c_block_pos);
+                self.cursor_col = self.rowlen(self.cursor_row);
                 self.type_mode = Mode::Insert;
                 true
             }
@@ -706,7 +782,7 @@ impl Editor {
     }
 
     pub fn multiple_key_press(&mut self, first_key: u8) -> (usize, u8) {
-        let mut keys_string = String::from((first_key - 48).to_string().as_str());
+        let mut keys_string = String::from((first_key - ASCII_DIGIT_OFFSET).to_string().as_str());
         let mut number: usize = 0;
         let mut key = editor_read_key(&mut self.stdin);
         let mut last_key_press: u8 = 0;
@@ -721,7 +797,7 @@ impl Editor {
                 last_key_press = x;
                 break;
             } else {
-                let current_byte_to_number = x - 48;
+                let current_byte_to_number = x - ASCII_DIGIT_OFFSET;
                 keys_string.push_str(current_byte_to_number.to_string().as_str());
             }
             key = editor_read_key(&mut self.stdin);
@@ -732,65 +808,65 @@ impl Editor {
     pub fn double_key_press(&mut self, first_byte_key: u8) -> bool {
         let second_key = editor_read_key(&mut self.stdin);
         if first_byte_key == b'g' && second_key == Key::Character(b'g') {
-            self.c_block_pos = 0;
-            self.c_inline_pos = 0;
+            self.cursor_row = 0;
+            self.cursor_col = 0;
         }
         true
     }
 
     pub fn move_by_space(&mut self, k: Key) -> bool {
-        if let Some(r) = self.rows.get(self.c_block_pos) {
+        if let Some(r) = self.rows.get(self.cursor_row) {
             let chars: Vec<char> = r.characters.chars().collect();
             loop {
                 match k {
                     Key::Character(b'w') => {
-                        if self.c_inline_pos >= chars.len() {
-                            if self.c_block_pos + 1 < self.rows.len() {
-                                self.c_block_pos += 1;
-                                self.c_inline_pos = 0;
+                        if self.cursor_col >= chars.len() {
+                            if self.cursor_row + 1 < self.rows.len() {
+                                self.cursor_row += 1;
+                                self.cursor_col = 0;
                                 return true;
                             } else {
                                 break;
                             }
                         }
 
-                        if chars[self.c_inline_pos] == ' '
-                            && (self.c_inline_pos + 1 < chars.len()
-                                && chars[self.c_inline_pos + 1] != ' ')
+                        if chars[self.cursor_col] == ' '
+                            && (self.cursor_col + 1 < chars.len()
+                                && chars[self.cursor_col + 1] != ' ')
                         {
-                            self.c_inline_pos += 1;
+                            self.cursor_col += 1;
                             break;
-                        } else if self.c_inline_pos >= chars.len() - 1 {
-                            self.c_inline_pos = chars.len();
+                        } else if self.cursor_col >= chars.len() - 1 {
+                            self.cursor_col = chars.len();
                             break;
                         } else {
-                            self.c_inline_pos += 1;
+                            self.cursor_col += 1;
                         }
                     }
 
                     Key::Character(b'b') => {
-                        if self.c_inline_pos == 0 {
-                            if self.c_block_pos == 0 {
+                        if self.cursor_col == 0 {
+                            if self.cursor_row == 0 {
                                 break;
                             } else {
-                                self.c_block_pos -= 1;
-                                self.c_inline_pos = self.rowlen(self.c_block_pos);
+                                self.cursor_row -= 1;
+                                self.cursor_col = self.rowlen(self.cursor_row);
                                 return true;
                             }
                         }
 
-                        if self.c_inline_pos >= chars.len() {
-                            self.c_inline_pos = chars.len() - 1;
+                        if self.cursor_col >= chars.len() {
+                            self.cursor_col = chars.len() - 1;
                         }
 
-                        if chars[self.c_inline_pos] != ' '
-                            && self.c_inline_pos > 0
-                            && chars[self.c_inline_pos - 1] == ' '
+                        if chars[self.cursor_col] != ' '
+                            && self.cursor_col > 0
+                            && chars[self.cursor_col - 1] == ' '
                         {
-                            self.c_inline_pos -= 1;
+                            self.cursor_col -= 1;
                             break;
                         } else {
-                            self.c_inline_pos -= 1;
+                            self.cursor_col -= 1;
                         }
                     }
                     _ => return true,
@@ -829,9 +905,9 @@ impl Editor {
             Key::Character(b'(') => {
                 self.insert_char('(');
                 self.insert_char(')');
-                self.c_inline_pos -= 1;
+                self.cursor_col -= 1;
             }
-            Key::Character(k) if (32..127).contains(&k) => self.insert_char(k as char),
+            Key::Character(k) if PRINTABLE_RANGE.contains(&k) => self.insert_char(k as char),
             _ => (),
         };
         true
@@ -893,6 +969,6 @@ impl Editor {
 
 impl Drop for Editor {
     fn drop(&mut self) {
-        clear_screen(&mut self.stdout).expect("Failed to clear screen");
+        let _ = clear_screen(&mut self.stdout);
     }
 }

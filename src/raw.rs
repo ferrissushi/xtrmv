@@ -1,7 +1,7 @@
 use libc::STDIN_FILENO;
 use termios::{
-    BRKINT, CS8, ECHO, ICANON, ICRNL, IEXTEN, INPCK, ISIG, ISTRIP, IXON, OPOST, TCSAFLUSH, Termios,
-    VMIN, VTIME, tcsetattr,
+    tcsetattr, Termios, BRKINT, CS8, ECHO, ICANON, ICRNL, IEXTEN, INPCK, ISIG, ISTRIP, IXON, OPOST,
+    TCSAFLUSH, VMIN, VTIME,
 };
 
 pub struct RawMode {
@@ -25,11 +25,28 @@ impl RawMode {
         tcsetattr(STDIN_FILENO, TCSAFLUSH, &terminal)?;
         Ok(mode)
     }
+
+    /// Creates a disabled RawMode for testing
+    #[doc(hidden)]
+    pub fn new_disabled() -> Self {
+        // Create a minimal terminal for testing
+        // We use from_fd and if that fails, we create a minimal Termios
+        let terminal = match Termios::from_fd(STDIN_FILENO) {
+            Ok(t) => t,
+            Err(_) => {
+                // Create a minimal Termios - most fields can be 0
+                unsafe { std::mem::zeroed() }
+            }
+        };
+        Self {
+            origin_terminal: terminal,
+        }
+    }
 }
 
 impl Drop for RawMode {
     fn drop(&mut self) {
-        tcsetattr(STDIN_FILENO, TCSAFLUSH, &self.origin_terminal)
-            .expect("Failed to drop raw mode. OUPS");
+        // Ignore errors during drop - especially in test environments
+        let _ = tcsetattr(STDIN_FILENO, TCSAFLUSH, &self.origin_terminal);
     }
 }

@@ -1,7 +1,7 @@
 use crate::key::Key;
+use libc::winsize;
 use libc::STDOUT_FILENO;
 use libc::TIOCGWINSZ;
-use libc::winsize;
 use std::io::Error;
 use std::io::ErrorKind;
 use std::io::Read;
@@ -34,15 +34,11 @@ pub fn get_window_size() -> Result<(u16, u16)> {
 pub const TAB_STOP: usize = 8;
 
 pub fn read_non_blocking<R: Read>(r: &mut R, buf: &mut [u8]) -> usize {
-    r.read(buf)
-        .or_else(|e| {
-            if e.kind() == ErrorKind::WouldBlock {
-                Ok(0)
-            } else {
-                Err(e)
-            }
-        })
-        .expect("Read_non_blocking")
+    match r.read(buf) {
+        Ok(n) => n,
+        Err(e) if e.kind() == ErrorKind::WouldBlock => 0,
+        Err(_) => 0,
+    }
 }
 
 pub fn byte_slice(s: &str, offset: usize, max_len: usize) -> &[u8] {

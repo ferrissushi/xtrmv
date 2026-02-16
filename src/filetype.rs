@@ -14,7 +14,14 @@ pub fn get_filetype(filename: &str, map: &HashMap<String, String>) -> String {
 }
 
 pub fn load_keywords(filetype: &str) -> Vec<String> {
-    let data = fs::read_to_string(&format!("src/{}.json", filetype)).expect("Failed to read syntax json file");
-    let map: HashMap<String, Vec<String>> = serde_json::from_str(&data).expect("Failed to parse syntax json file");
-    map.get("keywords").unwrap_or(&vec![]).to_vec()
+    let path = format!("src/{}.json", filetype);
+    let data = match fs::read_to_string(&path) {
+        Ok(d) => d,
+        Err(_) => return Vec::new(),
+    };
+    let map: HashMap<String, Vec<String>> = match serde_json::from_str(&data) {
+        Ok(m) => m,
+        Err(_) => return Vec::new(),
+    };
+    map.get("keywords").cloned().unwrap_or_default()
 }
